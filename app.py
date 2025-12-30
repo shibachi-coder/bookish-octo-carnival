@@ -84,7 +84,8 @@ def callback():
 def handle_message(event):
     user_id = event.source.user_id
     user_text = event.message.text
-
+    print(f"ユーザーからのメッセージ: {user_text}") # ログに表示
+  
     if user_id not in chat_sessions:
         chat_sessions[user_id] = model.start_chat(history=[])
     
@@ -93,15 +94,22 @@ def handle_message(event):
     try:
         response = chat.send_message(user_text)
         reply_text = response.text.strip()
+        print(f"Geminiの回答: {reply_text}") # ログに表示
+        
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=reply_text)
+        )
+        print("LINEへの返信に成功しました")
     except Exception as e:
-        reply_text = "申し訳ありません。エラーが発生しました。もう一度内容を入力してください。"
-
+        print(f"エラーが発生しました: {e}") # これで具体的なエラー内容がわかります
     line_bot_api.reply_message(
         event.reply_token,
-        TextSendMessage(text=reply_text)
+        TextSendMessage(text="申し訳ありません、処理中にエラーが起きました。")
     )
 
 if __name__ == "__main__":
     app.run(port=8000)
+
 
 
