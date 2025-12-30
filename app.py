@@ -4,7 +4,7 @@ from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
 import google.generativeai as genai
-from datetime import datetime, timedelta
+from datetime import datetime
 
 app = Flask(__name__)
 
@@ -18,46 +18,28 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 genai.configure(api_key=GOOGLE_API_KEY)
 
 # 現在の日付を取得（配送日数の計算基準）
-now = datetime.now()
-current_date_str = now.strftime("%Y年%m月%d日")
+current_date_str = datetime.now().strftime("%Y年%m月%d日")
 
-# --- 2. 120点のためのシステムプロンプト ---
+# --- 2. 120点：究極の配送コンシェルジュプロンプト ---
 SYSTEM_INSTRUCTION = f"""
 あなたは日本一親切な「郵便・発送コンシェルジュ」です。
-本日（{current_date_str}）発送する場合の【最安】と【最短】をズバリ回答します。
+本日（{current_date_str}）発送する場合の【最安】と【最短】を比較提案します。
 
-# 120点のためのUX指針
-1. 言葉を極限まで削り、視覚的（縦並び・絵文字）に伝える。
-2. ユーザーに文字を打たせない。「番号」だけで進めるよう誘導する。
-3. 住所は「154-0001」「世田谷区」「東京都」など、断片的な情報から送料を即断する。
-4. 「リセット」や「最初から」と言われたら、すべて忘れて最初の質問に戻る。
+# UX指針
+- 言葉を極限まで削り、視覚的（縦並び・絵文字）に伝える。
+- ユーザーに文字を打たせず、「番号」だけで進めるよう誘導する。
+- 住所、重さ、厚さから日本郵便の全サービス（ゆうパック、レターパック、手紙、はがき等）を網羅。
 
-# 知識ベース（日本郵便 全サービス対応）
-- 手紙/はがき/スマートレター(210円)/クリックポスト(185円)
-- レターパック(ライト430円/プラス600円)
-- ゆうパケット(250円〜360円)/ゆうパック(サイズ・地域別)
-- オプション：速達(+300円〜)、簡易書留(+350円)、特定記録(+210円)
-
-# 到着日の計算ロジック
+# 到着予定の計算
 - 翌日着：ゆうパック、レターパック、速達
 - 2-3日後：クリックポスト、ゆうパケット
-- 3-4日後：普通郵便（土日祝はカウント外とする）
+- 3-4日後：普通郵便（土日祝は配達なしとして計算）
 
 # 進行フロー
-1. 【何を送る？】
-   1️⃣ 書類・手紙
-   2️⃣ 小物(本・服など)
-   3️⃣ 箱・大型(ゆうパック)
-   4️⃣ はがき
-   5️⃣ その他(自由入力)
-
-2. 【サイズ確認】
-   選んだ番号に合わせて「厚さは3cm以内？」「重さは？」と1つずつ聞く。
-
-3. 【どこへ送る？】
-   「送り先の【都道府県】か【郵便番号】は？」と聞く。
-
-4. 【最終提案フォーマット】
+1. 【何を送る？】（1️⃣〜5️⃣の選択肢を提示）
+2. 【サイズ確認】（1つずつ簡潔に聞く）
+3. 【どこへ送る？】（都道府県や郵便番号を聞く）
+4. 【最終提案】
    ---
    💰【最安】[サービス名]
    └ 料金：[金額]円
@@ -69,17 +51,19 @@ SYSTEM_INSTRUCTION = f"""
    （※同じ場合は「最安と同じ」）
 
    💡【一言アドバイス】
-   [例：対面受取がいいならプラス170円でレターパックプラスが安心です]
+   [例：壊れやすいならゆうパック一択です]
    ---
 """
 
-# Gemini 3.0 Flash Preview を採用
+# Gemini 3.0 Flash Preview を採用（診断ログは削除しました）
 model = genai.GenerativeModel(
     model_name="models/gemini-3-flash-preview", 
     system_instruction=SYSTEM_INSTRUCTION
 )
 
 chat_sessions = {}
+
+# --- 3. ルーティング ---
 
 @app.route("/")
 def hello():
@@ -95,12 +79,14 @@ def callback():
         abort(400)
     return 'OK'
 
+# --- 4. メッセージ処理 ---
+
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_id = event.source.user_id
     user_text = event.message.text
     
-    # 「最初から」や「リセット」で会話をクリア
+    # リセット機能
     if user_text in ["最初から", "リセット", "やり直し", "0"]:
         if user_id in chat_sessions:
             del chat_sessions[user_id]
@@ -125,7 +111,7 @@ def handle_message(event):
         print(f"Error: {e}")
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text="すみません、うまく聞き取れませんでした。もう一度だけ入力してください。")
+            TextSendMessage(text="すみません、うまく聞き取れませんでした。もう一度入力してください。")
         )
 
 if __name__ == "__main__":
