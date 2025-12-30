@@ -62,7 +62,7 @@ SYSTEM_INSTRUCTION = """
 """
 
 model = genai.GenerativeModel(
-    model_name="gemini-1.5-flash",
+    model_name="gemini-1.5-flash-latest",
     system_instruction=SYSTEM_INSTRUCTION
 )
 
@@ -110,6 +110,7 @@ def handle_message(event):
 
 if __name__ == "__main__":
     app.run(port=8000)
+
 
 
 
