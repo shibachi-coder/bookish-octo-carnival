@@ -53,14 +53,53 @@ SYSTEM_INSTRUCTION = """
 8. 最終提案
 """
 
-# モデル名をフルパスで指定して404エラーを回避
-model = genai.GenerativeModel(
-    model_name="models/gemini-1.5-flash",
-    system_instruction=SYSTEM_INSTRUCTION
-)
+# 修正：モデルの初期化をより詳細に設定します
+try:
+    # 2025年現在の標準的な安定版モデル名を指定
+    model = genai.GenerativeModel(
+        model_name="gemini-1.5-flash", 
+        system_instruction=SYSTEM_INSTRUCTION
+    )
+    # 診断用：起動時に利用可能なモデルをログに出力する（任意）
+    print("--- 利用可能なモデルの確認を開始 ---")
+    for m in genai.list_models():
+        if 'generateContent' in m.supported_generation_methods:
+            print(f"利用可能モデル: {m.name}")
+except Exception as e:
+    print(f"モデル初期化エラー: {e}")
 
-# ユーザーごとの会話履歴を保持する辞書
-chat_sessions = {}
+# --- (中略：hello, callback関数はそのまま) ---
+
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event):
+    # (中略：user_id取得などはそのまま)
+    
+    if user_id not in chat_sessions:
+        chat_sessions[user_id] = model.start_chat(history=[])
+    
+    chat = chat_sessions[user_id]
+
+    try:
+        # 修正：最新のSDKに合わせて明示的にコンテンツを生成
+        response = chat.send_message(user_text)
+        
+        # エラーチェック（responseが空でないか）
+        if not response.text:
+            reply_text = "AIから有効な回答が得られませんでした。もう一度試してください。"
+        else:
+            reply_text = response.text.strip()
+        
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=reply_text)
+        )
+    except Exception as e:
+        print(f"Gemini通信エラー: {e}")
+        # LINE側へエラーを通知
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text="現在、AIとの通信に問題が発生しています。しばらく時間を置いてから再度お試しください。")
+        )
 
 # --- 3. ルーティング設定 ---
 
@@ -84,9 +123,34 @@ def callback():
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    user_id = event.source.user_id
-    user_text = event.message.text
-    print(f"ユーザーからのメッセージ: {user_text}")
+    # (中略：user_id取得などはそのまま)
+    
+    if user_id not in chat_sessions:
+        chat_sessions[user_id] = model.start_chat(history=[])
+    
+    chat = chat_sessions[user_id]
+
+    try:
+        # 修正：最新のSDKに合わせて明示的にコンテンツを生成
+        response = chat.send_message(user_text)
+        
+        # エラーチェック（responseが空でないか）
+        if not response.text:
+            reply_text = "AIから有効な回答が得られませんでした。もう一度試してください。"
+        else:
+            reply_text = response.text.strip()
+        
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=reply_text)
+        )
+    except Exception as e:
+        print(f"Gemini通信エラー: {e}")
+        # LINE側へエラーを通知
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text="現在、AIとの通信に問題が発生しています。しばらく時間を置いてから再度お試しください。")
+        )
     
     # セッションの開始
     if user_id not in chat_sessions:
@@ -122,3 +186,4 @@ if __name__ == "__main__":
     # RenderなどのPaaSでは環境変数のPORTを使用するため8000はローカル用
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port)
+
