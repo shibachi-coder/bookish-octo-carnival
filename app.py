@@ -7,7 +7,8 @@ import google.generativeai as genai
 
 app = Flask(__name__)
 
-# --- 環境変数設定 ---
+# --- 1. 環境変数設定 ---
+# RenderのDashboard > Environmentで設定した値を取得します
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
 GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
@@ -16,10 +17,10 @@ line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 genai.configure(api_key=GOOGLE_API_KEY)
 
-# --- 最新の料金体系を組み込んだシステムプロンプト ---
+# --- 2. 最新の料金体系を組み込んだシステムプロンプト ---
 SYSTEM_INSTRUCTION = """
 あなたは「日本郵便・発送最適化エージェント」です。
-**2024年10月1日改定後の最新料金体系**に基づき、オプション（速達・書留等）を含めた最安・最適な発送方法を提案します。
+2024年10月1日改定後の最新料金体系に基づき、オプション（速達・書留等）を含めた最安・最適な発送方法を提案します。
 
 # 2024年10月〜の主要料金データ（知識ベース）
 - 定形郵便: 50gまで一律 110円
@@ -37,39 +38,38 @@ SYSTEM_INSTRUCTION = """
   - 特定記録: +210円
 
 # 厳守ルール
-1. **1発言1質問の徹底**: 複数の情報を一度に聞かない。
-2. **逐次承認**: ユーザーの回答に対し「承知いたしました。〇〇ですね」と受け止めてから次の質問をする。
-3. **オプションの確認**: サイズ・重さの確認後、必ず「速達や書留（補償）、追跡などのオプション希望」があるかを確認する。
+1. **1発言1質問の徹底**: いかなる理由があっても、一度に複数の情報を求めてはいけません。
+2. **逐次承認**: ユーザーの回答に対し「承知いたしました。〇〇ですね」と受け止めてから次の質問をします。
+3. **オプションの確認**: サイズ・重さの確認後、必ず「速達や書留（補償）、追跡などのオプション希望」があるかを確認します。
 
-# 質問フロー
-1. 内容物の確認 ([1]〜[9]の選択肢)
+# 質問フロー (1つずつ質問すること)
+1. 内容物の確認 ([1]〜[9]の選択肢を提示)
 2. サイズ（縦）
 3. サイズ（横）
 4. サイズ（厚さ）
 5. 重さ
-6. オプション希望の確認（「急ぎ（速達）」「補償が必要（書留）」「追跡したい（特定記録）」などがあるか聞く）
-7. 発送元・先の都道府県（ゆうパックが候補になる場合のみ）
+6. オプション希望の確認（急ぎ、補償、追跡の有無）
+7. 発送元・先の都道府県（ゆうパックが必要な場合のみ）
 8. 最終提案
-
-# 最終提案フォーマット
----
-【最適解】[サービス名] ＋ [オプション名]
-【合計料金】[合計金額]円
-【内訳】基本料金 [金額]円 ＋ オプション [金額]円
-【メリット】[例：対面受取で安心、速達で明日着くなど]
-【他案】[例：補償が不要なら〇〇円安くなります等]
----
 """
 
+# モデル名をフルパスで指定して404エラーを回避
 model = genai.GenerativeModel(
-    model_name="gemini-1.5-flash",
+    model_name="models/gemini-1.5-flash",
     system_instruction=SYSTEM_INSTRUCTION
 )
 
+# ユーザーごとの会話履歴を保持する辞書
 chat_sessions = {}
+
+# --- 3. ルーティング設定 ---
+
+# Renderの稼働確認用
 @app.route("/")
 def hello():
     return "郵便物流ナビ：サーバー稼働中です！"
+
+# LINE Webhook用
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
@@ -80,38 +80,45 @@ def callback():
         abort(400)
     return 'OK'
 
+# --- 4. メッセージ処理ロジック ---
+
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_id = event.source.user_id
     user_text = event.message.text
-    print(f"ユーザーからのメッセージ: {user_text}") # ログに表示
-  
+    print(f"ユーザーからのメッセージ: {user_text}")
+    
+    # セッションの開始
     if user_id not in chat_sessions:
         chat_sessions[user_id] = model.start_chat(history=[])
     
     chat = chat_sessions[user_id]
 
     try:
+        # Geminiにメッセージを送信
         response = chat.send_message(user_text)
         reply_text = response.text.strip()
-        print(f"Geminiの回答: {reply_text}") # ログに表示
+        print(f"Geminiの回答: {reply_text}")
         
+        # LINEに返信
         line_bot_api.reply_message(
             event.reply_token,
             TextSendMessage(text=reply_text)
         )
         print("LINEへの返信に成功しました")
+
     except Exception as e:
-        print(f"エラーが発生しました: {e}") # これで具体的なエラー内容がわかります
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextSendMessage(text="申し訳ありません、処理中にエラーが起きました。")
-    )
+        print(f"エラーが発生しました: {e}")
+        # エラー発生時のみ、ユーザーへ通知する
+        try:
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text="申し訳ありません、処理中にエラーが起きました。もう一度入力してください。")
+            )
+        except:
+            print("エラーメッセージの送信にも失敗しました")
 
 if __name__ == "__main__":
-    app.run(port=8000)
-
-
-
-
-
+    # RenderなどのPaaSでは環境変数のPORTを使用するため8000はローカル用
+    port = int(os.environ.get("PORT", 8000))
+    app.run(host="0.0.0.0", port=port)
