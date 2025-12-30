@@ -1,14 +1,17 @@
-import os
+import os, re
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
+from linebot.models import (
+    MessageEvent, TextMessage, TextSendMessage, 
+    QuickReply, QuickReplyButton, MessageAction
+)
 import google.generativeai as genai
 from datetime import datetime
 
 app = Flask(__name__)
 
-# --- 1. 環境変数設定 ---
+# --- 環境変数 ---
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
 GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
@@ -17,45 +20,22 @@ line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 genai.configure(api_key=GOOGLE_API_KEY)
 
-# 現在の日付を取得（配送日数の計算基準）
-current_date_str = datetime.now().strftime("%Y年%m月%d日")
-
-# --- 2. 120点：究極の配送コンシェルジュプロンプト ---
+# --- プロンプト（ボタン化しやすいように1行1項目を徹底） ---
 SYSTEM_INSTRUCTION = f"""
-あなたは日本一親切な「郵便・発送コンシェルジュ」です。
-本日（{current_date_str}）発送する場合の【最安】と【最短】を比較提案します。
+あなたは発送コンシェルジュです。本日（{datetime.now().strftime("%m/%d")}）の最適解を出します。
 
-# UX指針
-- 言葉を極限まで削り、視覚的（縦並び・絵文字）に伝える。
-- ユーザーに文字を打たせず、「番号」だけで進めるよう誘導する。
-- 住所、重さ、厚さから日本郵便の全サービス（ゆうパック、レターパック、手紙、はがき等）を網羅。
+# ルール
+- 選択肢は必ず「1:項目名」の形式で、1行に1つ書くこと。
+- 余計な挨拶は省き、すぐ質問に入る。
+- 最後に「最安」と「最短」を比較。
 
-# 到着予定の計算
-- 翌日着：ゆうパック、レターパック、速達
-- 2-3日後：クリックポスト、ゆうパケット
-- 3-4日後：普通郵便（土日祝は配達なしとして計算）
-
-# 進行フロー
-1. 【何を送る？】（1️⃣〜5️⃣の選択肢を提示）
-2. 【サイズ確認】（1つずつ簡潔に聞く）
-3. 【どこへ送る？】（都道府県や郵便番号を聞く）
-4. 【最終提案】
-   ---
-   💰【最安】[サービス名]
-   └ 料金：[金額]円
-   └ 到着：[月/日]頃
-
-   🚀【最短】[サービス名]
-   └ 料金：[金額]円
-   └ 到着：[月/日]頃
-   （※同じ場合は「最安と同じ」）
-
-   💡【一言アドバイス】
-   [例：壊れやすいならゆうパック一択です]
-   ---
+# 質問フロー
+1. 分類選択（書類/小物/大型/はがき/その他）
+2. 厚さ・重さ・サイズの確認
+3. 送り先の都道府県
+4. 最終提案
 """
 
-# Gemini 3.0 Flash Preview を採用（診断ログは削除しました）
 model = genai.GenerativeModel(
     model_name="models/gemini-3-flash-preview", 
     system_instruction=SYSTEM_INSTRUCTION
@@ -63,11 +43,20 @@ model = genai.GenerativeModel(
 
 chat_sessions = {}
 
-# --- 3. ルーティング ---
-
-@app.route("/")
-def hello():
-    return "郵便・発送コンシェルジュ稼働中"
+def make_quick_reply(text):
+    """テキストから『1:〇〇』のような行を探してボタンにする"""
+    # 「数字:」または「数字：」または「数字️⃣」で始まる行を抽出
+    options = re.findall(r'([1-9一二三四五][:：️⃣][^\n]+)', text)
+    if not options:
+        return None
+    
+    items = []
+    for opt in options[:13]: # LINEの仕様で最大13個まで
+        # ボタンのラベル用に「1:」などを削る（任意）
+        label = opt[:20] # 20文字制限
+        items.append(QuickReplyButton(action=MessageAction(label=label, text=opt)))
+    
+    return QuickReply(items=items)
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -79,41 +68,31 @@ def callback():
         abort(400)
     return 'OK'
 
-# --- 4. メッセージ処理 ---
-
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_id = event.source.user_id
     user_text = event.message.text
     
-    # リセット機能
-    if user_text in ["最初から", "リセット", "やり直し", "0"]:
-        if user_id in chat_sessions:
-            del chat_sessions[user_id]
-        reply_text = "リセットしました。送るものはどれですか？\n\n1️⃣ 書類・手紙\n2️⃣ 小物\n3️⃣ 箱・大型\n4️⃣ はがき\n5️⃣ その他"
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
-        return
+    if user_text in ["最初から", "リセット"]:
+        if user_id in chat_sessions: del chat_sessions[user_id]
+        user_text = "最初から"
 
     if user_id not in chat_sessions:
         chat_sessions[user_id] = model.start_chat(history=[])
     
-    chat = chat_sessions[user_id]
-
     try:
-        response = chat.send_message(user_text)
+        response = chat_sessions[user_id].send_message(user_text)
         reply_text = response.text.strip()
+        
+        # ボタンを自動生成
+        q_reply = make_quick_reply(reply_text)
         
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text=reply_text)
+            TextSendMessage(text=reply_text, quick_reply=q_reply)
         )
     except Exception as e:
-        print(f"Error: {e}")
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text="すみません、うまく聞き取れませんでした。もう一度入力してください。")
-        )
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="エラーです。リセットして下さい"))
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
