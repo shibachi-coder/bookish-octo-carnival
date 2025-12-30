@@ -67,7 +67,7 @@ model = genai.GenerativeModel(
 )
 
 chat_sessions = {}
-@app.app.route("/")
+@app.route("/")
 def hello():
     return "郵便物流ナビ：サーバー稼働中です！"
 @app.route("/callback", methods=['POST'])
@@ -103,4 +103,5 @@ def handle_message(event):
 
 if __name__ == "__main__":
     app.run(port=8000)
+
 
