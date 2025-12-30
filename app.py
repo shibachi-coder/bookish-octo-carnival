@@ -50,7 +50,7 @@ SYSTEM_INSTRUCTION = """
 # --- 3. モデルの初期化と診断 ---
 try:
     model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash", 
+        model_name="gemini-2.5-flash", 
         system_instruction=SYSTEM_INSTRUCTION
     )
     # 診断用：利用可能なモデルをログに出力
@@ -121,3 +121,4 @@ def handle_message(event):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port)
+
