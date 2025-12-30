@@ -4,6 +4,7 @@ from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
 import google.generativeai as genai
+from datetime import datetime
 
 app = Flask(__name__)
 
@@ -16,59 +17,61 @@ line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 genai.configure(api_key=GOOGLE_API_KEY)
 
-# --- 2. システムプロンプト ---
-SYSTEM_INSTRUCTION = """
-あなたは「日本郵便・発送最適化エージェント」です。
-2024年10月1日改定後の最新料金体系に基づき、オプション（速達・書留等）を含めた最安・最適な発送方法を提案します。
+# 現在の日付を取得（到着予定日の計算用）
+current_date = datetime.now().strftime("%Y年%m月%d日")
 
-# 2024年10月〜の主要料金データ
-- 定形郵便: 50gまで一律 110円
-- 通常はがき: 85円
-- 定形外郵便（規格内）: 50g 140円 / 100g 180円 / 150g 270円 / 250g 320円 / 500g 510円 / 1kg 750円
-- スマートレター: 210円
-- レターパックライト: 430円
-- レターパックプラス: 600円
-- クリックポスト: 185円（要事前決済・ラベル印刷）
-- ゆうパケット: 厚さにより変動（1cm 250円 / 2cm 310円 / 3cm 360円）
+# --- 2. 究極の比較提案システムプロンプト ---
+SYSTEM_INSTRUCTION = f"""
+あなたは「郵便・発送ナビ」です。
+本日（{current_date}）発送した場合の、最安と最短のプランを比較提案してください。
 
-# 厳守ルール
-1. **1発言1質問の徹底**: いかなる理由があっても、一度に複数の情報を求めてはいけません。
-2. **逐次承認**: ユーザーの回答に対し「承知いたしました。〇〇ですね」と受け止めてから次の質問をします。
-3. **オプションの確認**: サイズ・重さの確認後、必ず「速達や書留（補償）、追跡などのオプション希望」があるかを確認します。
+# 基本方針
+- 挨拶や余計な説明は一切不要。
+- 選択肢は必ず縦に並べ、数字で選ばせる。
+- 住所、重さ、厚さから、日本郵便の全サービスから最適なものを選定。
 
-# 質問フロー
-1. 内容物 [1]〜[9]
-2. 縦
-3. 横
-4. 厚さ
-5. 重さ
-6. オプション確認
-7. 発送元・先（必要な場合）
-8. 最終提案
+# 配送スピードの目安（本日発送の場合）
+- 普通郵便（定形・定形外）：3〜4日後（土日祝の配達なし）
+- 速達・レターパック・ゆうパック：翌日〜翌々日
+- クリックポスト・ゆうパケット：2〜3日後
+
+# 進行フロー
+1. 【内容物の確認】（1〜5の選択肢を縦に提示）
+2. 【サイズ・重さの確認】（1つずつ簡潔に聞く）
+3. 【住所の確認】（県名や郵便番号を聞く）
+4. 【オプション確認】（補償の要否など。急ぎかどうかはここで聞かずに最終提案で比較する）
+
+# 最終提案フォーマット（厳守）
+「最安」と「最短」が異なる場合、必ず2パターン提示してください。
+
+---
+【最安プラン】
+・サービス：[サービス名]
+・料金：[金額]円
+・到着予定：[○月○日]頃
+
+【最短プラン】
+・サービス：[サービス名]
+・料金：[金額]円
+・到着予定：[○月○日]頃
+（※最安と同じ場合は「最安と同じ」と記載）
+
+【アドバイス】
+[例：補償が必要なら＋350円で簡易書留にできます]
+---
 """
 
-# --- 3. モデルの初期化と診断 ---
-try:
-    model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash", 
-        system_instruction=SYSTEM_INSTRUCTION
-    )
-    # 診断用：利用可能なモデルをログに出力
-    print("--- 利用可能なモデルの確認を開始 ---")
-    for m in genai.list_models():
-        if 'generateContent' in m.supported_generation_methods:
-            print(f"利用可能モデル: {m.name}")
-except Exception as e:
-    print(f"初期設定エラー: {e}")
+# Gemini 3.0 Flash Preview を採用
+model = genai.GenerativeModel(
+    model_name="models/gemini-3-flash-preview", 
+    system_instruction=SYSTEM_INSTRUCTION
+)
 
-# 会話履歴の保持
 chat_sessions = {}
-
-# --- 4. ルーティング ---
 
 @app.route("/")
 def hello():
-    return "郵便物流ナビ：サーバー稼働中です！"
+    return "郵便・発送ナビ稼働中"
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -80,45 +83,31 @@ def callback():
         abort(400)
     return 'OK'
 
-# --- 5. メッセージ処理 ---
-
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_id = event.source.user_id
     user_text = event.message.text
-    print(f"ユーザーからのメッセージ: {user_text}")
     
-    # セッションの開始/取得
     if user_id not in chat_sessions:
         chat_sessions[user_id] = model.start_chat(history=[])
     
     chat = chat_sessions[user_id]
 
     try:
-        # Geminiに送信
         response = chat.send_message(user_text)
+        reply_text = response.text.strip()
         
-        if not response.text:
-            reply_text = "AIから回答が得られませんでした。もう一度試してください。"
-        else:
-            reply_text = response.text.strip()
-        
-        print(f"Geminiの回答: {reply_text}")
-
-        # LINEへ返信
         line_bot_api.reply_message(
             event.reply_token,
             TextSendMessage(text=reply_text)
         )
     except Exception as e:
-        print(f"通信エラー詳細: {e}")
-        # LINE側へエラーを通知
+        print(f"Error: {e}")
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text="現在AIと通信できません。時間を置いてから再度お試しください。")
+            TextSendMessage(text="すみません、もう一度入力してください。")
         )
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port)
-
