@@ -1,10 +1,11 @@
-import os, re
+import os, re, json
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import (
     MessageEvent, TextMessage, TextSendMessage, 
-    QuickReply, QuickReplyButton, MessageAction
+    QuickReply, QuickReplyButton, MessageAction,
+    FlexSendMessage, BubbleContainer
 )
 import google.generativeai as genai
 from datetime import datetime
@@ -20,20 +21,20 @@ line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 genai.configure(api_key=GOOGLE_API_KEY)
 
-# --- プロンプト（ボタン化しやすいように1行1項目を徹底） ---
+# --- 150点のためのシステムプロンプト ---
 SYSTEM_INSTRUCTION = f"""
 あなたは発送コンシェルジュです。本日（{datetime.now().strftime("%m/%d")}）の最適解を出します。
 
-# ルール
-- 選択肢は必ず「1:項目名」の形式で、1行に1つ書くこと。
-- 余計な挨拶は省き、すぐ質問に入る。
-- 最後に「最安」と「最短」を比較。
+# 進行ルール
+- 選択肢は必ず「1:項目名」形式で縦に並べる（クイックリプライ用）。
+- 最終提案の時だけ、必ず以下の【JSON形式】で回答を締めくくってください。
 
-# 質問フロー
-1. 分類選択（書類/小物/大型/はがき/その他）
-2. 厚さ・重さ・サイズの確認
-3. 送り先の都道府県
-4. 最終提案
+【JSON形式】
+{{
+  "cheapest": {{"name": "サービス名", "price": "金額", "date": "月/日"}},
+  "fastest": {{"name": "サービス名", "price": "金額", "date": "月/日"}},
+  "advice": "一言アドバイス"
+}}
 """
 
 model = genai.GenerativeModel(
@@ -43,19 +44,51 @@ model = genai.GenerativeModel(
 
 chat_sessions = {}
 
+def create_shipping_flex(data):
+    """提案データを元に美しいFlex Messageを作成する"""
+    return {
+      "type": "bubble",
+      "header": {
+        "type": "box", "layout": "vertical", "contents": [
+          {"type": "text", "text": "📦 発送ナビ 最終提案", "weight": "bold", "color": "#ffffff", "size": "sm"}
+        ], "backgroundColor": "#E60012"
+      },
+      "body": {
+        "type": "box", "layout": "vertical", "contents": [
+          {"type": "text", "text": "あなたに最適なプランは以下の通りです", "size": "xs", "color": "#888888", "margin": "md"},
+          {"type": "separator", "margin": "md"},
+          # 最安セクション
+          {"type": "box", "layout": "vertical", "margin": "lg", "contents": [
+            {"type": "text", "text": "💰 最安プラン", "weight": "bold", "size": "md", "color": "#f1c40f"},
+            {"type": "box", "layout": "horizontal", "contents": [
+              {"type": "text", "text": data['cheapest']['name'], "flex": 4, "size": "sm", "weight": "bold"},
+              {"type": "text", "text": f"¥{data['cheapest']['price']}", "flex": 2, "size": "sm", "align": "end"}
+            ]},
+            {"type": "text", "text": f"到着予定: {data['cheapest']['date']} 頃", "size": "xs", "color": "#555555"}
+          ]},
+          # 最速セクション
+          {"type": "box", "layout": "vertical", "margin": "lg", "contents": [
+            {"type": "text", "text": "🚀 最短プラン", "weight": "bold", "size": "md", "color": "#3498db"},
+            {"type": "box", "layout": "horizontal", "contents": [
+              {"type": "text", "text": data['fastest']['name'], "flex": 4, "size": "sm", "weight": "bold"},
+              {"type": "text", "text": f"¥{data['fastest']['price']}", "flex": 2, "size": "sm", "align": "end"}
+            ]},
+            {"type": "text", "text": f"到着予定: {data['fastest']['date']} 頃", "size": "xs", "color": "#555555"}
+          ]}
+        ]
+      },
+      "footer": {
+        "type": "box", "layout": "vertical", "contents": [
+          {"type": "text", "text": f"💡 {data['advice']}", "size": "xs", "color": "#666666", "wrap": True},
+          {"type": "button", "action": {"type": "message", "label": "最初からやり直す", "text": "最初から"}, "style": "link", "height": "sm"}
+        ]
+      }
+    }
+
 def make_quick_reply(text):
-    """テキストから『1:〇〇』のような行を探してボタンにする"""
-    # 「数字:」または「数字：」または「数字️⃣」で始まる行を抽出
     options = re.findall(r'([1-9一二三四五][:：️⃣][^\n]+)', text)
-    if not options:
-        return None
-    
-    items = []
-    for opt in options[:13]: # LINEの仕様で最大13個まで
-        # ボタンのラベル用に「1:」などを削る（任意）
-        label = opt[:20] # 20文字制限
-        items.append(QuickReplyButton(action=MessageAction(label=label, text=opt)))
-    
+    if not options: return None
+    items = [QuickReplyButton(action=MessageAction(label=opt[:20], text=opt)) for opt in options[:13]]
     return QuickReply(items=items)
 
 @app.route("/callback", methods=['POST'])
@@ -84,14 +117,32 @@ def handle_message(event):
         response = chat_sessions[user_id].send_message(user_text)
         reply_text = response.text.strip()
         
-        # ボタンを自動生成
-        q_reply = make_quick_reply(reply_text)
+        # JSONが含まれているかチェック
+        json_match = re.search(r'\{.*\}', reply_text, re.DOTALL)
         
+        if json_match:
+            # JSON部分を解析してFlex Messageを送信
+            try:
+                data = json.loads(json_match.group())
+                # JSON以外のテキスト部分があればそれも送る
+                clean_text = reply_text.replace(json_match.group(), "").strip()
+                messages = []
+                if clean_text: messages.append(TextSendMessage(text=clean_text))
+                
+                flex_content = create_shipping_flex(data)
+                messages.append(FlexSendMessage(alt_text="発送プランの提案", contents=flex_content))
+                line_bot_api.reply_message(event.reply_token, messages)
+                return
+            except:
+                pass # 解析失敗時は通常のテキスト送信へ
+        
+        # 通常のテキスト＋クイックリプライ送信
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text=reply_text, quick_reply=q_reply)
+            TextSendMessage(text=reply_text, quick_reply=make_quick_reply(reply_text))
         )
     except Exception as e:
+        print(f"Error: {e}")
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text="エラーです。リセットして下さい"))
 
 if __name__ == "__main__":
