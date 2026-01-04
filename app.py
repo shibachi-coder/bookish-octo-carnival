@@ -1,80 +1,81 @@
-import streamlit as st
+import os
+from flask import Flask, request, abort
+from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
 
-# アプリのタイトル
-st.title("郵便物流ナビ 📮")
-st.caption("日本郵便・発送最適化エージェント")
+app = Flask(__name__)
 
-# セッション状態（会話の進捗）の初期化
-if "step" not in st.session_state:
-    st.session_state.step = 1
-    st.session_state.data = {}
+# LINE公式アカウントの設定 (環境変数や直接入力)
+LINE_CHANNEL_ACCESS_TOKEN = 'YOUR_CHANNEL_ACCESS_TOKEN'
+LINE_CHANNEL_SECRET = 'YOUR_CHANNEL_SECRET'
 
-def next_step():
-    st.session_state.step += 1
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# 1発言1質問の徹底ロジック
-if st.session_state.step == 1:
-    st.write("こんにちは！発送の最適化をお手伝いします。")
-    option = st.selectbox(
-        "送りたいものの種類を選んでください：",
-        ["選択してください", "はがき", "手紙", "小さな荷物（3辺90cm以内）", "大きな荷物", "海外への送付", "その他"],
-        key="type"
-    )
-    if option != "選択してください":
-        if st.button("次へ"):
-            st.session_state.data["type"] = option
-            next_step()
-            st.rerun()
+# ユーザーの状態を一時的に保存する辞書
+# 実際の実装ではRedisやDBを推奨
+user_sessions = {}
 
-elif st.session_state.step == 2:
-    st.write(f"【{st.session_state.data['type']}】ですね。承知いたしました。")
-    size = st.text_input("荷物のサイズ（縦・横・高さの合計/cm）を教えてください：")
-    if size:
-        if st.button("次へ"):
-            st.session_state.data["size"] = size
-            next_step()
-            st.rerun()
+# 質問の定義
+QUESTIONS = [
+    "こんにちは！発送の最適化をお手伝いします。\nまずは送りたいものの種類を番号で選んでください。\n1) はがき\n2) 手紙\n3) 小さな荷物（3辺90cm、4kg以内）\n4) 大きな荷物\n5) 日本以外への送付\n6) その他",
+    "承知いたしました。次に、荷物の【縦、横、高さの合計（cm）】を教えてください。",
+    "ありがとうございます。次に、【重さ】を教えてください。",
+    "承知いたしました。次に、【発送元の住所（または郵便番号）】を教えてください。",
+    "ありがとうございます。次に、【お届け先の住所（または郵便番号）】を教えてください。",
+    "最後に、追跡の有無や速達希望など、その他条件はありますか？（なければ「なし」）"
+]
 
-elif st.session_state.step == 3:
-    weight = st.text_input("荷物の重さ（gまたはkg）を教えてください：")
-    if weight:
-        if st.button("次へ"):
-            st.session_state.data["weight"] = weight
-            next_step()
-            st.rerun()
+@app.route("/callback", methods=['POST'])
+def callback():
+    signature = request.headers['X-Line-Signature']
+    body = request.get_data(as_text=True)
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        abort(400)
+    return 'OK'
 
-elif st.session_state.step == 4:
-    origin = st.text_input("発送元の郵便番号または都道府県を教えてください：")
-    if origin:
-        if st.button("次へ"):
-            st.session_state.data["origin"] = origin
-            next_step()
-            st.rerun()
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event):
+    user_id = event.source.user_id
+    text = event.message.text
 
-elif st.session_state.step == 5:
-    dest = st.text_input("お届け先の郵便番号または都道府県を教えてください：")
-    if dest:
-        if st.button("次へ"):
-            st.session_state.data["dest"] = dest
-            next_step()
-            st.rerun()
+    # セッションの初期化
+    if user_id not in user_sessions:
+        user_sessions[user_id] = {"step": 0, "answers": []}
+        reply_text = QUESTIONS[0]
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+        return
 
-elif st.session_state.step == 6:
-    condition = st.text_input("その他、追跡の有無や速達希望など条件はありますか？（なければ「なし」）")
-    if condition:
-        if st.button("診断結果を表示する"):
-            st.session_state.data["condition"] = condition
-            next_step()
-            st.rerun()
+    session = user_sessions[user_id]
+    current_step = session["step"]
 
-elif st.session_state.step == 7:
-    st.success("全ての情報を確認しました。最適な配送方法をご案内します。")
-    st.json(st.session_state.data)
+    # 回答を保存
+    session["answers"].append(text)
     
-    # ここにロジックに基づいた提案内容を表示
-    st.write("### 提案：クリックポスト（最安） / レターパック（最速）")
-    
-    if st.button("最初からやり直す"):
-        st.session_state.step = 1
-        st.session_state.data = {}
-        st.rerun()
+    # 次のステップへ
+    next_step = current_step + 1
+    session["step"] = next_step
+
+    if next_step < len(QUESTIONS):
+        # 次の質問を送信
+        reply_text = f"承知いたしました。\n\n{QUESTIONS[next_step]}"
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+    else:
+        # すべての回答が揃ったので診断結果を表示
+        ans = session["answers"]
+        # ここで簡易的なロジック判定
+        result = (
+            "全ての情報を確認いたしました！最適な方法をご案内します。\n\n"
+            "💰 【最安】クリックポスト（185円）\n"
+            "⚡ 【最速】レターパックプラス（600円）\n\n"
+            "※実際の料金はサイズにより変動する場合があります。詳細は窓口でご確認ください。"
+        )
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=result))
+        # セッションをリセット
+        del user_sessions[user_id]
+
+if __name__ == "__main__":
+    app.run(port=5000)
