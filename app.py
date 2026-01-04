@@ -1,4 +1,6 @@
 import os
+import sys
+import logging
 from datetime import datetime, timedelta
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
@@ -6,10 +8,19 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
 
 app = Flask(__name__)
+app.logger.setLevel(logging.INFO)
 
-# LINE設定（ご自身のものに置き換えてください）
-LINE_CHANNEL_ACCESS_TOKEN = 'YOUR_CHANNEL_ACCESS_TOKEN'
-LINE_CHANNEL_SECRET = 'YOUR_CHANNEL_SECRET'
+# --- 環境変数の読み込み ---
+# 直接書き込む場合は 'YOUR_...' を消して実際の文字列を入れてください
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN', 'YOUR_CHANNEL_ACCESS_TOKEN')
+LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET', 'YOUR_CHANNEL_SECRET')
+
+# 起動時にログを出力（app定義の後に移動）
+app.logger.info(f"Access Token Length: {len(LINE_CHANNEL_ACCESS_TOKEN) if LINE_CHANNEL_ACCESS_TOKEN else 'EMPTY'}")
+app.logger.info(f"Channel Secret Length: {len(LINE_CHANNEL_SECRET) if LINE_CHANNEL_SECRET else 'EMPTY'}")
+
+if LINE_CHANNEL_ACCESS_TOKEN == 'YOUR_CHANNEL_ACCESS_TOKEN':
+    app.logger.warning("警告: LINEのトークンがデフォルト値のままです。")
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
@@ -29,6 +40,7 @@ def callback():
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
+        app.logger.error("署名検証に失敗しました。")
         abort(400)
     return 'OK'
 
@@ -43,7 +55,7 @@ def handle_message(event):
         msg = ("こんにちは。日本郵便の物流コンシェルジュでございます。\n"
                "お客様の大切なお荷物に、最も適した発送方法をご提案させていただきます。\n\n"
                "まずは、お送りいただくものの種類を教えていただけますでしょうか？\n\n"
-               "1) はがき\n2) 手紙\n3) 小さな荷物\n4) 大きな荷物\n5) 海外発送\n6) その他（具体的に入力）")
+               "1) はがき\n2) 手紙\n3) 小さな荷物\n4) 大きな荷物\n5) 海外発送\n6) その他")
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=msg))
         return
 
@@ -57,12 +69,12 @@ def handle_message(event):
         
         if text == "6" or kind is None:
             session["answers"]["kind"] = text if kind is None else "その他"
-            session["step"] = "SIZE"
             msg = f"「{text}」でございますね。承知いたしました。\nそれでは、梱包を含めた【縦・横・高さの合計（cm）】を教えていただけますか？"
         else:
             session["answers"]["kind"] = kind
-            session["step"] = "SIZE"
             msg = f"「{kind}」をお送りになるのですね。ありがとうございます。\nそれでは、お荷物の【縦・横・高さの合計（cm）】を教えていただけますでしょうか。"
+        
+        session["step"] = "SIZE"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=msg))
 
     elif step == "SIZE":
@@ -90,7 +102,6 @@ def handle_message(event):
         session["step"] = "Q_TODAY"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text="承知いたしました。最後に、お荷物は【本日中】に発送（投函または窓口へのお持ち込み）をご予定でしょうか？"))
 
-    # --- 最終提案：コンシェルジュとしての回答 ---
     elif step == "Q_TODAY":
         is_today = (text == "はい")
         ans = session["answers"]
@@ -101,7 +112,6 @@ def handle_message(event):
         send_date = datetime.now() if is_today else datetime.now() + timedelta(days=1)
         arrival_date = send_date + timedelta(days=base_days)
         
-        # 提案メッセージ構築
         proposal = (
             f"お客様のご要望に合わせて、最適なプランをご案内いたします。\n\n"
             f"📦 【おすすめの発送方法】\n"
@@ -129,5 +139,6 @@ def handle_message(event):
         del user_sessions[user_id]
 
 if __name__ == "__main__":
-    app.run(port=5000)
-
+    # Renderの環境に合わせたポート指定
+    port = int(os.getenv("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
