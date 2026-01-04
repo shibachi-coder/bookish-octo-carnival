@@ -24,7 +24,7 @@ LEAD_TIME_MATRIX = {
 
 @app.route("/callback", methods=['POST'])
 def callback():
-    signature = request.headers['X-Signature']
+    signature = request.headers.get('X-Line-Signature')
     body = request.get_data(as_text=True)
     try:
         handler.handle(body, signature)
@@ -130,3 +130,4 @@ def handle_message(event):
 
 if __name__ == "__main__":
     app.run(port=5000)
+
